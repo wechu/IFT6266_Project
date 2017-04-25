@@ -11,15 +11,26 @@ import time
 # Custom files
 import utils
 import ConvNetBase
+import GAN
+import ContextEncoder
 
 
+def squeeze_range(x):
+    x = 0 if x < 0 else x
+    x = 1 if x > 1 else x
+    return x
+squeeze = np.vectorize(squeeze_range)
 
 
 def draw_image(input, target, pred):
     """ Draws the true image and the predicted image """
+    input = input[:, :, :] # make deep copy
+    target = target[:, :, :]
+    pred = pred[:, :, :]
     # dimshuffle to put channels in last dim so we can plot (x, y, channel)
     input = input.transpose((1, 2, 0))
     target = target.transpose((1, 2, 0))
+    pred = squeeze(pred)
     pred = pred.transpose((1, 2, 0))
 
     print(input.shape)
@@ -42,203 +53,111 @@ def draw_image(input, target, pred):
     plt.show()
     return
 
-def plot_training_curves(train_loss, valid_loss):
-    """ Plots the training and validation set losses """
+def draw_gan_image(image):
+    image = squeeze(image)
+    image = image.transpose((1, 2, 0))
+    plt.figure(figsize=(8, 8)).canvas.set_window_title("Generated")
+    plt.imshow(image)
+    plt.show()
+    return
+
+def plot_training_curves(train_loss, valid_loss=None, valid_freq=0, skip=0):
+    """ Plots the losses. Use plt.show() after this method. """
+    plt.plot(range(skip, len(train_loss)), train_loss[skip:])
+    if valid_loss is not None:
+        plt.plot(valid_freq*np.array(range(1,1+len(valid_loss))), valid_loss)
 
     return
 
-def squeeze_range(x):
-    x = 0 if x < 0 else x
-    x = 1 if x > 1 else x
-    return x
-squeeze = np.vectorize(squeeze_range)
-
-
-#TODO load model
-#TODO fix this
-
-
-
-# t_x = np.random.uniform(0, 1, (3, 64, 64)).astype('float32')
-# t_y = np.random.uniform(0, 1, (3, 32, 32)).astype('float32')
-# t_p = np.zeros((3, 32, 32), dtype='float32')
-# draw_image(t_x, t_y, t_p)
-# quit()
-
 if __name__ == '__main__':
-    # Get data
-    print("Get data...")
-    x_train, y_train, cap_train = utils.load_dataset("Data/train2014.pkl.gz")
-    x_valid, y_valid, cap_valid = utils.load_dataset("Data/val2014.pkl.gz")
+    mode = "try_con"
 
-    x_train = np.array(x_train, dtype='float32') /255  # rescale data to [0,1]
-    y_train = np.array(y_train, dtype='float32') /255
-    x_valid = np.array(x_valid, dtype='float32') /255
-    y_valid = np.array(y_valid, dtype='float32') /255
+    if mode == "plot_loss":
+        # plot losses
+        with open("Results/CNN4/CNN4_train.txt") as f:
+            train_losses = np.array(f.readlines(), dtype='float64')
+        with open("Results/CNN4/CNN4_valid.txt") as f:
+            valid_losses = np.array(f.readlines(), dtype='float64')
 
-    # Rearrange the dims in the data
-    x_train = x_train.transpose((0, 3, 1, 2))  # put the channel dim before the horiz/verti dims
-    y_train = y_train.transpose((0, 3, 1, 2))
-    x_valid = x_valid.transpose((0, 3, 1, 2))
-    y_valid = y_valid.transpose((0, 3, 1, 2))
+        valid_freq = 600
+        print(valid_losses[0:5])
+        print("Min valid:", np.min(valid_losses), np.argmin(valid_losses) * valid_freq,
+              "\tTrain:", train_losses[np.argmin(valid_losses) * valid_freq])
+        plot_training_curves(train_losses, valid_losses, valid_freq, skip=100)
+        plt.show()
 
-    # initialize model
-    input_var = T.tensor4('inputs', dtype='float32')
-    target_var = T.tensor4('targets', dtype='float32')
-    network = ConvNetBase.build_cnn(input_var, batch_size=64)
+    if mode == "plot_gan":
+        # plot losses
+        model_name = "CON9"
+        with open("Results/" + model_name + "_dis.txt") as f:
+            dis_losses = np.array(f.readlines(), dtype='float64')
+        with open("Results/" + model_name + "_gen.txt") as f:
+            gen_losses = np.array(f.readlines(), dtype='float64')
+        with open("Results/" + model_name + "_check.txt") as f:
+            check_losses = np.array(f.readlines(), dtype='float64')
 
-    # get test predictions and loss
-    test_pred = L.get_output(network, deterministic=True)
-    test_loss = lasagne.objectives.squared_error(test_pred, target_var)
-    test_loss = test_loss.mean()
+        skip = 10000
+        #plot_training_curves(check_losses, skip=skip)  # blue
+        #plot_training_curves(dis_losses, skip=skip)  # green
+        #plot_training_curves(gen_losses, skip=skip)  # red
 
-    # compile method
-    valid_method = theano.function([input_var, target_var], [test_loss, test_pred])
+        window = 100
+        avg_check = [np.mean(check_losses[max(i-window, 0):i+1]) for i in range(len(check_losses))]
+        plot_training_curves(avg_check, skip=skip)
+        plt.ylim((0.03, 0.08))
 
-    # Load model from file
-    utils.load_model_weights(network, "Results/weights_e_2_i_899.pkl")
+        avg_gen = [np.mean(gen_losses[max(i-window, 0):i+1]) for i in range(len(gen_losses))]
+        plot_training_curves(avg_gen, skip=skip)
 
-    # Test examples
-    batch_size = 64
-    ex = 0  # batch number to check
+        avg_dis = [np.mean(dis_losses[max(i-window, 0):i+1]) for i in range(len(dis_losses))]
+        plot_training_curves(avg_dis, skip=skip)
 
-    ex_x_train = x_train[ ex *batch_size:( ex +1 ) *batch_size]
-    ex_y_train = y_train[ ex *batch_size:( ex +1 ) *batch_size]
-    ex_x_valid = x_valid[ ex *batch_size:( ex +1 ) *batch_size]
-    ex_y_valid = y_valid[ ex *batch_size:( ex +1 ) *batch_size]
-
-    _, pred = valid_method(ex_x_train, ex_y_train)  # from train set
-    _, predv = valid_method(ex_x_valid, ex_y_valid)  # from valid set
-
-    np.set_printoptions(threshold=np.nan)
-
-    pred = squeeze(pred)
-    predv = squeeze(predv)
-
-    i=2
-    draw_image(ex_x_train[i], ex_y_train[i], pred[i])
-    draw_image(ex_x_valid[i], ex_y_valid[i], predv[i])
+        plt.show()
 
 
-    # t_x = np.random.uniform(0, 1, (3, 32, 32)).astype('float32')
-    # t_y = np.random.uniform(0, 1, (3, 32, 32)).astype('float32')
-    # t_p = np.zeros((3, 32, 32), dtype='float32')
+    if mode == "try_gan":
+        net = GAN.BEGAN("", noise_dim=64)
+
+        net.compile_theano(learn_rate=0, batch_size=64, mode="v1")
+        utils.load_model_weights(net.gen, "Results/BEG_gen_weights_e_2_it_26400.pkl")
+
+        noise = np.random.normal(size=(64, 64)).astype('float32')
+
+        samples = net.gen_method(noise)
+
+        for i in range(10):
+            draw_gan_image(samples[i])
 
 
-    # #####################################################
-    # pred = pred.transpose((0, 2, 3, 1))  # dimshuffle to put channels in last dim so we can plot (batch, x, y, channel)
-    # pred2 = pred2.transpose((0, 2, 3, 1))
-    #
-    # # process predictions to be able to plot
-    # pred = pred.astype('int32')
-    # pred2 = pred2.astype('int32')
-    # def squeeze_range(x):
-    #     x = 0 if x < 0 else x
-    #     x = 255 if x > 255 else x
-    #     return x
-    # squeeze = np.vectorize(squeeze_range)
-    # pred = squeeze(pred)
-    # pred2 = squeeze(pred2)
-    # # convert to uint8 for plotting (don't need this if pixels are in [0, 1])
-    # pred = pred.astype('uint8')
-    # pred2 = pred2.astype('uint8')
-    #
-    # pred = pred.transpose((0, 2, 3, 1))  # dimshuffle to put channels in last dim so we can plot (batch, x, y, channel)
-    # pred2 = pred2.transpose((0, 2, 3, 1))
-    # ex_x_train = ex_x_train.transpose((0, 2, 3, 1))
-    # ex_y_train = ex_y_train.transpose((0, 2, 3, 1))
-    # ex_x_valid = ex_x_valid.transpose((0, 2, 3, 1))
-    # ex_y_valid = ex_y_valid.transpose((0, 2, 3, 1))
-    #
-    #
-    # plt.rcParams['toolbar'] = 'None'
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    #
-    # for i in range(min(batch_size, 6)):
-    #     residuals = pred[i].astype('int32') - ex_y_train[i].astype('int32')
-    #
-    #     # plt.figure()
-    #     # print(pred[i].flatten().shape)
-    #     plt.hist(pred[i].flatten())
-    #     # plt.figure()
-    #     # plt.hist(residuals.flatten())
-    #     print(np.mean(np.square(residuals.flatten())))
-    #     # print(pred[i].dtype)
-    #     # print(ex_y_train[i].dtype)
-    #     # print("residuals")
-    #     # print(residuals)
-    #     # print("prediction")
-    #     # print(pred[i])
-    #     # print("true y")
-    #     # print(ex_y_train[i])
-    #
-    #
-    #
-    #
-    #     plt.figure(figsize=(8 ,8))
-    #     plt.imshow(ex_x_train[i])
-    #     plt.figure(figsize=(4 ,4)).canvas.set_window_title("Target")
-    #     plt.imshow(ex_y_train[i])
-    #
-    #     ran_res = np.max(residuals) - np.min(residuals)
-    #     if ran_res != 0:
-    #         plt.figure(figsize=(4 ,4))
-    #         plt.imshow((residuals - np.min(residuals) ) /ran_res)
-    #     else:
-    #         print("All residuals are 0")
-    #
-    #     plt.figure(figsize=(4 ,4)).canvas.set_window_title("Prediction")
-    #     plt.imshow(pred[i])
-    #
-    #
-    #
-    #     plt.show()
-    #
-    # print("Validation test")
-    # for i in range(batch_size):
-    #     residuals = pred2[i].astype('int32') - ex_y_valid[i].astype('int32')
-    #
-    #     # plt.figure()
-    #     # print(pred2[i].flatten().shape)
-    #     # plt.hist(pred2[i].flatten())
-    #     plt.figure()
-    #     plt.hist(residuals.flatten())
-    #     print(np.mean(np.square(residuals.flatten())))
-    #     # print(pred2[i].dtype)
-    #     # print(ex_y_valid[i].dtype)
-    #     # print("residuals")
-    #     # print(residuals)
-    #     # print("prediction")
-    #     # print(pred2[i])
-    #     # print("true y")
-    #     # print(ex_y_valid[i])
-    #
-    #
-    #
-    #     plt.figure(figsize=(8 ,8))
-    #     plt.imshow(ex_x_valid[i])
-    #     plt.figure(figsize=(4 ,4)).canvas.set_window_title("Target")
-    #     plt.imshow(ex_y_valid[i])
-    #
-    #     ran_res = np.max(residuals) - np.min(residuals)
-    #     if ran_res != 0:
-    #         plt.figure(figsize=(4 ,4))
-    #         plt.imshow((residuals - np.min(residuals) ) /ran_res)
-    #     else:
-    #         print("All residuals are 0")
-    #
-    #
-    #
-    #
-    #     plt.figure(figsize=(4 ,4)).canvas.set_window_title("prediction")
-    #     plt.imshow(pred2[i])
-    #
-    #
-    #     plt.show()
+    if mode == "try_con":
+        # Get data
+        print("Get data...")
+        check_train = False
+        if check_train:
+            x_train, y_train, cap_train = utils.load_dataset("Data/train2014.pkl.gz")
+        x_valid, y_valid, cap_valid = utils.load_dataset("Data/val2014.pkl.gz")
+
+        net = ContextEncoder.BEGAN("", gamma=0.5, k_initial=0)
+        net.compile_theano(mode="v7", batch_size=32, learn_rate=0, training=False)
+        #utils.load_model_weights(net.gen, "Results/CON8_3_gen_weights_it_70000.pkl")
+        utils.load_model_weights(net.gen, "Results/CON9_gen_weights_it_118000.pkl")
+
+        # Test examples
+        batch_size = 32
+        ex = 130  # batch number to check
+
+        ex_x_valid = x_valid[ ex *batch_size:( ex +1 ) *batch_size]
+        ex_y_valid = y_valid[ ex *batch_size:( ex +1 ) *batch_size]
+
+        predv = net.gen_method(ex_x_valid)  # from valid set
+        for i in range(0, 5):
+            draw_image(ex_x_valid[i], ex_y_valid[i], predv[i])
+
+        if check_train:
+            i=1
+            ex_x_train = x_train[ ex *batch_size:( ex +1 ) *batch_size]
+            ex_y_train = y_train[ ex *batch_size:( ex +1 ) *batch_size]
+            pred = net.gen_method(ex_x_train)  # from train set
+            draw_image(ex_x_train[i], ex_y_train[i], pred[i])
+
+

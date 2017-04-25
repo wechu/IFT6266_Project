@@ -11,8 +11,16 @@ import lasagne
 def load_dataset(file):
 
     with gzip.open(file, 'rb') as pickle_file:
-        input_img, target_img, caption = pickle.load(pickle_file)
-
+        input_img, target_img, caption = pickle.load(pickle_file)   
+    
+    input_img = np.array(input_img, dtype='float32') # rescale data to [0,1]
+    input_img /= 255
+    target_img = np.array(target_img, dtype='float32')
+    target_img /= 255
+    # Rearrange the dims in the data
+    input_img = input_img.transpose((0, 3, 1, 2))  # put the channel dim before the horiz/verti dims
+    target_img = target_img.transpose((0, 3, 1, 2))
+    
     return input_img, target_img, caption
 
 
@@ -28,19 +36,16 @@ def load_model_weights(model, filename):
     lasagne.layers.set_all_param_values(model, weights)
     return
 
+def save_updates(model_updates, filename):
+    all_values = [item.get_value() for item in model_updates]
+    with open(filename, 'wb') as f:
+        pickle.dump(all_values, f)
+    return
 
-if __name__ == "__main__":
-    # x, y, cap = load_dataset()
-    plt.rcParams['toolbar'] = 'None'
-
-    # print(cap[0])
-    #
-    # print(len(x), len(y), len(cap))
-    #
-    # plt.figure(figsize=(8,8))
-    # plt.imshow(x[0])
-    # plt.figure(figsize=(4,4))
-    # plt.imshow(y[0])
-    # plt.show()
-
-
+def load_updates(model_updates, filename):
+    # compile first though
+    with open(filename, 'rb') as f:
+        ups = pickle.load(f)
+    for u, v in zip(model_updates, ups):
+        u.set_value(v)
+    return
