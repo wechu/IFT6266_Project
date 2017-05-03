@@ -13,7 +13,7 @@ import utils
 
 
 class BEGAN():
-    def __init__(self, name="", gamma=0.5, k_initial=0, loss_adv=0.5, dis_type="full_to_center"):
+    def __init__(self, name="", gamma=0.5, k_initial=0, loss_adv=0.5, dis_type="center_to_center", use_caption=False):
         self.name = name
         self.gen = None  # generator
         self.dis = None  # discriminator
@@ -21,13 +21,17 @@ class BEGAN():
         self.k = k_initial
         self.loss_adv = loss_adv
         self.dis_type = dis_type  # center_to_center, full_to_full, full_to_center
+        self.use_caption = use_caption
         self.updates = None
         pass
 
-    def compile_theano(self, learn_rate, batch_size, mode, momentum=0.9, training=True, inputs_shape=None, targets_shape=None, macro_batch_size=None):
+    def compile_theano(self, learn_rate, batch_size, mode, momentum=0.9, training=True,
+                       inputs_shape=None, targets_shape=None, macro_batch_size=None):
         border_var = T.tensor4('input', dtype='float32')
         # noise_var = T.matrix('noise', dtype='float32')  # no noise
         target_var = T.tensor4('target', dtype='float32')
+        if self.use_caption:
+            caption_var = T.matrix('caption', dtype='float32')
 
         if self.dis_type in ("full_to_full", "full_to_center"):
             center = (32, 32)  # center of image
@@ -57,12 +61,19 @@ class BEGAN():
         if mode == "v7":
             self.gen = self.build_gen7(border_var, batch_size)
             self.dis = self.build_dis7(target_var, batch_size)
+        if mode == "v8":
+            self.gen = self.build_gen8(border_var, caption_var, batch_size)
+            self.dis = self.build_dis8(target_var, caption_var, batch_size)
 
         # get predictions from discriminator (autoencoder)
         if self.dis_type in ("center_to_center"):  # use only the center in the dis
             real_autoenc = L.get_output(self.dis)  # inputs real center patch to dis
             fake_center = L.get_output(self.gen)  # inputs border
-            fake_autoenc = L.get_output(self.dis, inputs=fake_center)
+            if self.use_caption:
+                fake_autoenc = L.get_output(self.dis, inputs={target_var: fake_center, caption_var: caption_var})
+            else:
+                fake_autoenc = L.get_output(self.dis, inputs=fake_center)
+
         else:  # use the full image
             real_autoenc = L.get_output(self.dis, inputs=real_full)
             fake_center = L.get_output(self.gen, inputs=border_var)
@@ -109,27 +120,50 @@ class BEGAN():
         self.updates = updates
 
         print("Compiling methods...")
-        # compile methods to train (trains everything at once)
-        if training:
-            self.macro_batch_inputs = theano.shared(np.empty((macro_batch_size,) + inputs_shape, dtype='float32'), borrow=True)
-            self.macro_batch_targets = theano.shared(np.empty((macro_batch_size,) + targets_shape, dtype='float32'), borrow=True)
-            index = T.lscalar()
-            self.train_method = theano.function([index], [T.mean(loss_real), T.mean(loss_fake), k, T.mean(loss_gen)],
-                                                updates=updates,
-                                                givens={border_var: self.macro_batch_inputs[index*batch_size:(index+1)*batch_size],
-                                                        target_var: self.macro_batch_targets[index*batch_size:(index+1)*batch_size]})
+        if not self.use_caption:
+            # compile methods to train (trains everything at once)
+            if training:
+                self.macro_batch_inputs = theano.shared(np.empty((macro_batch_size,) + inputs_shape, dtype='float32'), borrow=True)
+                self.macro_batch_targets = theano.shared(np.empty((macro_batch_size,) + targets_shape, dtype='float32'), borrow=True)
+                index = T.lscalar()
+                self.train_method = theano.function([index], [T.mean(loss_real), T.mean(loss_fake), k, T.mean(loss_gen)],
+                                                    updates=updates,
+                                                    givens={border_var: self.macro_batch_inputs[index*batch_size:(index+1)*batch_size],
+                                                            target_var: self.macro_batch_targets[index*batch_size:(index+1)*batch_size]})
 
-        # method to generate just images
-        self.gen_method = theano.function([border_var], L.get_output(self.gen, inputs=border_var, deterministic=True))
+            # method to generate just images
+            self.gen_method = theano.function([border_var], L.get_output(self.gen, inputs=border_var, deterministic=True))
 
+        if self.use_caption: # we input the sentence embedding in addition to the border
+            if training:
+                self.macro_batch_inputs = theano.shared(np.empty((macro_batch_size,) + inputs_shape, dtype='float32'),
+                                                        borrow=True)
+                self.macro_batch_targets = theano.shared(np.empty((macro_batch_size,) + targets_shape, dtype='float32'),
+                                                         borrow=True)
+                self.macro_batch_captions = theano.shared(np.empty((macro_batch_size,) + (4800,), dtype='float32'),
+                                                         borrow=True)
+                index = T.lscalar()
+                self.train_method = theano.function([index], [T.mean(loss_real), T.mean(loss_fake), k, T.mean(loss_gen)],
+                                                    updates=updates,
+                                                    givens={border_var: self.macro_batch_inputs[
+                                                                        index * batch_size:(index + 1) * batch_size],
+                                                            target_var: self.macro_batch_targets[
+                                                                        index * batch_size:(index + 1) * batch_size],
+                                                            caption_var: self.macro_batch_captions[
+                                                                         index * batch_size:(index + 1) * batch_size]
+                                                            })
+
+            # method to generate just images
+            self.gen_method = theano.function([border_var, caption_var],
+                                              L.get_output(self.gen, inputs={border_var:border_var, caption_var:caption_var}, deterministic=True))
         return
 
     def compute_global_loss(self, loss_real, loss_fake):
         ''' Computes global loss to assess training '''
         return loss_real + abs(self.gamma * loss_real - loss_fake)
 
-    def train(self, inputs, targets, batch_size=32, macro_batch_size=8192, start_iter=1, log_file=None, anneal=False):
-        save_freq = 1000
+    def train(self, inputs, targets, captions=None, batch_size=32, macro_batch_size=8192, start_iter=1, log_file=None, anneal=False):
+        save_freq = 2000
         x_train_num = targets.shape[0]
         gen_file = self.name + "_gen.txt"
         dis_file = self.name + "_dis.txt"
@@ -138,6 +172,8 @@ class BEGAN():
         dis_string = ""
         check_string = ""
         log_string = ""
+        if captions is not None:
+            captions = np.array(captions).astype('float32')
 
         # training loop
         num_epochs = 100
@@ -158,6 +194,8 @@ class BEGAN():
                 shuffle_ind = index_list[macro_batch_i*macro_batch_size: (macro_batch_i+1)*macro_batch_size]
                 self.macro_batch_inputs.set_value(inputs[shuffle_ind], borrow=True)
                 self.macro_batch_targets.set_value(targets[shuffle_ind], borrow=True)
+                if self.use_caption:
+                    self.macro_batch_captions.set_value(captions[shuffle_ind, epoch % 5], borrow=True) # cycle through the 5 captions every epoch
 
                 for i in range(macro_batch_size // batch_size):
                     # train on one minibatch
@@ -789,7 +827,7 @@ class BEGAN():
         # output is 32 x 32
         return network
 
-    # Trying different generator setup (more weights, smaller bottleneck)
+    # Trying different generator setup (more weights, bigger bottleneck, less layers)
     def build_gen6(self, input, batch_size):
         # we input the border (no noise)
         network = L.InputLayer(shape=(batch_size, 3, 64, 64), input_var=input)
@@ -1073,3 +1111,164 @@ class BEGAN():
                                 pad="same", stride=1)
 
         return network
+
+    # use captions now
+    def build_gen8(self, input_gen, input_caption, batch_size):
+        # we input the border (no noise)
+        network = L.InputLayer(shape=(batch_size, 3, 64, 64), input_var=input_gen)
+
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(5, 5),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(5, 5),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad=1, stride=2))
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same"))
+
+        network = (L.Conv2DLayer(network, num_filters=96, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad=1, stride=2))
+        network = (L.Conv2DLayer(network, num_filters=96, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=96, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same"))
+
+        network = (L.Conv2DLayer(network, num_filters=128, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad=1, stride=2))
+        network = (L.Conv2DLayer(network, num_filters=128, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=128, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same"))
+
+        # 8x8 image size here
+        network = L.DenseLayer(network, num_units=128,
+                               nonlinearity=lasagne.nonlinearities.identity)
+
+        # Reduce dimensionality of embedding and concatenate with hidden rep
+        network2 = L.InputLayer(shape=(batch_size, 4800), input_var=input_caption)
+        network2 = L.DenseLayer(network2, num_units=128,
+                               nonlinearity=lasagne.nonlinearities.identity)
+        network = L.ConcatLayer([network, network2])
+
+        network = L.DenseLayer(network, num_units=4096,
+                               nonlinearity=lasagne.nonlinearities.elu)
+
+        network = L.ReshapeLayer(network, shape=(batch_size, 64, 8, 8))
+
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+
+        network = L.Upscale2DLayer(network, 2, mode='repeat')
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+
+        network = L.Upscale2DLayer(network, 2, mode='repeat')
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+
+        network = L.Conv2DLayer(network, num_filters=3, filter_size=(3, 3),
+                                nonlinearity=lasagne.nonlinearities.identity,
+                                pad="same", stride=1)
+
+        # output is 32 x 32
+        return network
+
+    def build_dis8(self, input_dis, input_caption, batch_size):
+        # We input only the 32x32 center patch
+        network = L.InputLayer(shape=(batch_size, 3, 32, 32), input_var=input_dis)
+
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad=1, stride=2))
+
+        network = (L.Conv2DLayer(network, num_filters=96, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=96, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same"))
+        network = (L.Conv2DLayer(network, num_filters=96, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad=1, stride=2))
+
+        network = (L.Conv2DLayer(network, num_filters=128, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=128, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same"))
+
+        # 8x8 image size here
+        network = L.DenseLayer(network, num_units=128,
+                               nonlinearity=lasagne.nonlinearities.identity)
+
+        # Reduce dimensionality of embedding and concatenate with hidden rep
+        network2 = L.InputLayer(shape=(batch_size, 4800), input_var=input_caption)
+        network2 = L.DenseLayer(network2, num_units=128,
+                               nonlinearity=lasagne.nonlinearities.identity)
+        network = L.ConcatLayer([network, network2])
+
+        network = L.DenseLayer(network, num_units=4096,
+                               nonlinearity=lasagne.nonlinearities.elu)
+
+        network = L.ReshapeLayer(network, shape=(batch_size, 64, 8, 8))
+
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+
+        network = L.Upscale2DLayer(network, 2, mode='repeat')
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+
+        network = L.Upscale2DLayer(network, 2, mode='repeat')
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+        network = (L.Conv2DLayer(network, num_filters=64, filter_size=(3, 3),
+                                             nonlinearity=lasagne.nonlinearities.elu,
+                                             pad="same", stride=1))
+
+        network = L.Conv2DLayer(network, num_filters=3, filter_size=(3, 3),
+                                nonlinearity=lasagne.nonlinearities.identity,
+                                pad="same", stride=1)
+
+        return network
+
+

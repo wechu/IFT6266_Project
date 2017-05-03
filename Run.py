@@ -27,6 +27,8 @@ if __name__ == "__main__":
     print("Get data...")
     raw_x_train, raw_y_train, raw_cap_train = utils.load_dataset("Data/train2014.pkl.gz")
     raw_x_valid, raw_y_valid, raw_cap_valid = utils.load_dataset("Data/val2014.pkl.gz")
+    with gzip.open("Data/train2014_embed_all.pkl.gz", 'rb') as pickle_file:
+        cap_train = np.asarray(pickle.load(pickle_file, encoding='latin1'), dtype='float32')
 
     print(raw_x_train.shape)
     print(raw_x_valid.shape)
@@ -44,12 +46,12 @@ if __name__ == "__main__":
     y_valid = raw_y_valid
 
     # Load from iter
-    name = "CON9"
-    net = ContextEncoder.BEGAN(name, gamma=0.3, k_initial=0.0, loss_adv=0.9, dis_type="center_to_center")
-    net.compile_theano(0.000004, batch_size=64, mode="v7", momentum=0.5, training=True,
-                       inputs_shape=x_train.shape[1:], targets_shape=y_train.shape[1:], macro_batch_size=2048)
+    name = "COP2"
+    net = ContextEncoder.BEGAN(name, gamma=0.4, k_initial=0, loss_adv=0.9, use_caption=True, dis_type="center_to_center")
+    net.compile_theano(0.0001, batch_size=48, mode="v8", momentum=0.5, training=True,
+                       inputs_shape=x_train.shape[1:], targets_shape=y_train.shape[1:], macro_batch_size=4608)
 
-    it = 92000
+    it = 0
     if it > 0:
         # utils.load_model_weights(net.gen, "{}_gen_weights_it_{}.pkl".format(name, it))
         # utils.load_model_weights(net.dis, "{}_dis_weights_it_{}.pkl".format(name, it))
@@ -59,7 +61,7 @@ if __name__ == "__main__":
         f.write("done compiling\n")
         f.write("Start training\n")
 
-    net.train(x_train, y_train, batch_size=64, macro_batch_size=2048, anneal=True, start_iter=(it+1), log_file=log_file)
+    net.train(x_train, y_train, captions=cap_train, batch_size=48, macro_batch_size=4608, anneal=True, start_iter=(it+1), log_file=log_file)
 
     #net.train(y_train, noise_type="uniform", log_file=log_file)  # train GAN on 32x32 center patches
     #net.train(y_train, noise_type="gaussian", start_iter=26401, log_file=log_file)
